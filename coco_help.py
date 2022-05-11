@@ -784,7 +784,7 @@ def gt_from_im_list(full_gt, img_list, new_gt_path):
     # Process one image at a time
     for image in img_list:
         i = int(image.split('_')[0].replace('maksssksksss', '').split('.')[0])
-        anns = anns_on_image(i, full_gt) 
+        anns = anns_on_image(i, gt) 
         annotations.extend(anns)
         for im_info in gt['images']:
             if im_info['id'] == i:

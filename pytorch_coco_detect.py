@@ -5,7 +5,11 @@ import json
 from PIL import Image
 from pycocotools.coco import COCO
 import os
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from tqdm import tqdm
+import numpy as np
+import copy
+import random
+
 from matplotlib import pyplot as plt
 from imgaug.augmentables.bbs import BoundingBox, BoundingBoxesOnImage
 import imageio
@@ -16,6 +20,9 @@ import imageio
 import imgaug as ia
 from imgaug import augmenters as iaa
 import torchvision.transforms.functional as TF
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, FasterRCNN
+from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
+from torchvision.models.detection.rpn import AnchorGenerator
 
 class myTrainDataset(torch.utils.data.Dataset):
     def __init__(self, root, annotation, transforms=None):
@@ -243,15 +250,18 @@ def detector_dts(model, data_loader, dt_path, iuo_nms):
 
     return
 
-def get_model_instance_segmentation(num_classes, pre_trained):
-    # load an instance segmentation model pre-trained pre-trained on COCO
-    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=pre_trained)
-    # get number of input features for the classifier
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    # replace the pre-trained head with a new one
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+def get_fasterrcnn(num_classes, pre_trained, resnet_depth = 50):
+    try:
+        backbone = resnet_fpn_backbone(f'resnet{resnet_depth}', pre_trained)
+        model = FasterRCNN(backbone, num_classes)
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+        
+        return model
+    except:
+        print('This model depth is not supported. Please make sure the model depth is a supported integer value')
+        return
 
-    return model
 
 def make_train_loader(data_dir, gt, batch_size, num_workers):
     '''
@@ -344,9 +354,9 @@ def define_model_path(save_folder, num_classes, model_name, data_name, optim, lr
 def train_one_epoch(model, data_loader, optimizer, device, path):
     model.train()
     len_dataloader = len(data_loader)
-    i = 0  
-    # Process all data in the data loader  
-    for imgs, annotations in data_loader:
+    # Process all data in the data loader 
+    epoch_losses = [] 
+    for imgs, annotations in tqdm(data_loader):
         
         # Prepare images and annotations
         imgs = list(img.to(device) for img in imgs)
@@ -355,20 +365,14 @@ def train_one_epoch(model, data_loader, optimizer, device, path):
         # Calculate loss and backpropagate
         loss_dict = model(imgs, annotations)
         losses = sum(loss for loss in loss_dict.values())
+        epoch_losses.append(losses)
         optimizer.zero_grad()
         losses.backward()
         optimizer.step()
 
-        # Provide feedback
-        if i % 25 == 0:
-            print(f'Iteration: {i}/{len_dataloader}, Loss: {losses}')
-
-        # Save model out occasionally
-        if i % 50 == 0:
-           torch.save(model.state_dict(), path) 
-
-        i += 1
     # Upon completion of the whole epoch
+    epoch_loss = np.mean(epoch_losses)
+    print(f'Epoch loss: {epoch_loss}')
     ep = int(path.split('_')[-1].replace('.pt', ''))
     path = '_'.join(path.split('_')[:-1]) + '_' + str(ep + 1) + '.pt'
     torch.save(model.state_dict(), path)
@@ -428,3 +432,144 @@ def detector_dts(model, data_loader, dt_path, iuo_nms):
         json.dump(detections, f) 
 
     return
+
+def train_fasterrcnn(model, model_path, data_loaders, optim, lr, mom, wd, epochs):
+    
+    ### Initialization ###
+    # Defining data structures to store train and test info for linear classifier
+    losses_train = []
+    accs_train = []
+    losses_val = []
+    accs_val = []
+    best_model_weights = model.state_dict()
+    starting_epoch = 0
+
+    # set to monitor performance
+    lowest_train_loss = 9999999999999999999
+    
+    # load any previous training
+    if os.path.exists(model_path):
+        # load model information
+        model_info = torch.load(model_path)
+        # weights
+        best_model_weights = model_info['weights']
+        model.load_state_dict(best_model_weights)
+        # epoch
+        starting_epoch = model_info['epochs_trained']
+        # loss
+        losses_train = model_info['losses train']
+        losses_val = model_info['losses val']
+        # accuracy
+        accs_train = model_info['acc train']
+        accs_val = model_info['acc val']
+        # lowest train loss
+        lowest_train_loss = model_info['least train loss']
+
+        print(f'Loading {starting_epoch} epochs of training for fasterrcnn')
+
+    # unpack data loaders
+    train_loader, val_loader = data_loaders
+
+    # find your device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+    model.to(device)
+
+    # parameters
+    params = [p for p in model.parameters() if p.requires_grad]
+
+    # Set optimizer
+    if optim == 'SGD':
+        optimizer = torch.optim.SGD(params, lr=lr, momentum=mom, weight_decay=wd)
+    elif optim == 'Adam':
+        optimizer = torch.optim.Adam(params, lr=lr)
+
+    for epoch in range(starting_epoch, epochs):
+        print(f'Training epoch {epoch + 1} of {epochs}')
+        ### Training ###
+        model.train()
+        epoch_train_losses = []
+        # Process all data in the data loader 
+        for imgs, annotations in tqdm(train_loader):
+            
+            # Prepare images and annotations
+            imgs = list(img.to(device) for img in imgs)
+            annotations = [{k: v.to(device) for k, v in t.items()} for t in annotations]
+            
+            # Calculate loss 
+            loss_dict = model(imgs, annotations)
+            losses = sum(loss for loss in loss_dict.values())
+            epoch_train_losses.append(losses.cpu().detach().numpy())
+
+            # Backprop
+            optimizer.zero_grad()
+            losses.backward()
+            optimizer.step()
+
+        # Train epoch done
+        epoch_train_loss = np.mean(epoch_train_losses)
+        losses_train.append(epoch_train_loss)
+        
+        ### Validation ###
+        # TBD
+
+        ### Save Out ###
+        if epoch_train_loss < lowest_train_loss:
+            best_model_weights = copy.deepcopy(model.state_dict())
+            lowest_train_loss = epoch_train_loss
+            print(f'Lowest train loss: {lowest_train_loss}')
+
+        # either way, save the model
+        model_info = {'weights': best_model_weights,
+                      'epochs_trained': epoch + 1,
+                      'least train loss': lowest_train_loss,
+                      'acc train': accs_train,
+                      'acc val': accs_val,
+                      'losses train': losses_train,
+                      'losses val': losses_val}
+        torch.save(model_info, model_path)
+
+    return losses_train
+
+def name_model(save_folder, num_classes, model_name, data_name, optim, lr, mom, wd, pretrained, batch_size):
+    '''
+    Purpose: Create a distinctive path for your model. If a model of this type,
+    with this optimizer, etc has been trained before, start on the highest epoch 
+    that model has reached. Else, start at epoch 0
+    IN:
+      save_folder: broad folder for storing models
+      num_classes: number of classes
+      model_name: str, descriing architecture
+                  actual saved folder will be save_folder/model_name/path
+      data_name: str, describing data used
+      optim: string, describing your optimizer type
+      lr, mom, wd: floats, learning rate/momentum/weight decay for optimizer
+      pretrained: bool, whether model is pretrained
+      batch_size: int, batch size
+    OUT:
+      path to model
+
+    REPLACES: define_model_path
+    '''
+
+    # Open the correct folder, creating it if necessry
+    model_folder = save_folder + model_name + '/'
+    if not os.path.exists(model_folder):
+        os.mkdir(model_folder)
+
+    # Get a list of all current models
+    current_models = os.listdir(model_folder)
+
+    # List all relevant parameters, in a fixed order after key id strings
+    path_params = [data_name, 'classes', num_classes, 
+                          'optim', optim, 'lr', lr, 'mom', mom, 'wd', wd,
+                          'pretrained', pretrained,
+                          'batch', batch_size]
+
+    # Ensure all params are saved as strings, then create a key to id this model config
+    path_params = [str(p) for p in path_params]
+    model_path = '_'.join(path_params).replace('.', 'p')
+
+    # Save definitive model path
+    path = model_folder + model_path + '.pt'
+
+    return path
