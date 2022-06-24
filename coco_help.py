@@ -9,6 +9,109 @@ from PIL import Image
 import shutil
 from tqdm import tqdm
 
+def anns_on_image(im_id, contents):
+    '''
+    IN: 
+        - im_id: int id for 'id' in 'images' of coco json
+        - json_path: path to coco gt json
+    OUT:
+        - on_image: list of annotations on the given image
+    '''
+    
+    # Pull out annotations
+    anns = contents['annotations']
+    
+    # Create list of anns on this image
+    on_image = []
+    for a in anns:
+        if a['image_id'] == im_id:
+            on_image.append(a)
+    
+    return on_image
+
+def anns_on_image_dt(im_id, json_path):
+    '''
+    IN: 
+        - im_id: int id for 'id' in 'images' of coco json
+        - json_path: path to coco gt json
+    OUT:
+        - on_image: list of annotations on the given image
+    '''
+    # Open json
+    with open(json_path, 'r') as f:
+        contents = json.load(f)
+    
+    # Create list of anns on this image
+    on_image = []
+    for a in contents:
+        if a['image_id'] == im_id:
+            on_image.append(a)
+    
+    return on_image
+
+def check_for_parity(train_gt_path, test_gt_path, chip_dir):
+    '''
+    Purpose: determine if all the images in a defined train/test split
+    exist within a specified folder
+    '''
+    # Get a list of all chips in the split
+    test_ims = json_images(test_gt_path)
+    train_ims = json_images(train_gt_path)
+
+    former_ims = test_ims.copy()
+    former_ims.extend(train_ims)
+
+    # List of images in the folder
+    new_ims = os.listdir(chip_dir)
+
+    # Check if all images in split are in folder
+    # And all ims in folder are in split
+    they_match = True
+
+    for i in new_ims:
+        if i not in former_ims:
+            they_match = False
+
+    for i in former_ims:
+        if i not in new_ims:
+            they_match = False
+
+    # Print results
+    if they_match:
+        print("Images in these jsons and the specified folder match")
+    else:
+        print("These images don't quite match. Sad.")
+                     
+    return they_match
+
+def choose_random_ims(num_ims, contents):
+    '''
+    IN:
+        -num_ims: int number of image ids desired
+        -contents: coco json contents
+    OUT:
+        -list of num_ims random image ids from the input json
+    '''
+    
+    # Pull out key section
+    images = contents['images']
+    
+    # Get a list of all image ids in the json
+    all_ims = []
+    for i in images:
+        all_ims.append(i['id'])
+    
+    # Enusre there are no duplicates in the list
+    all_ims = list(set(all_ims))
+    
+    # Shuffle the list
+    random.shuffle(all_ims)
+    
+    # Create a smaller list of the num_ims requested
+    rand_ims = all_ims[:num_ims]
+    
+    return rand_ims
+
 def classification_from_json(json_path, image_folder, classification_folder):
 
     if not os.path.exists(classification_folder):
@@ -50,6 +153,214 @@ def classification_from_json(json_path, image_folder, classification_folder):
                 plt.imsave(chip_path, chip)
     return
 
+def convert_imgs_rgb(folder):
+    '''
+    Purpose: force all images in folder to assume kosher image format
+    '''
+    test_images = os.listdir(folder)
+    test_images = [folder + i for i in test_images]
+    count  = 0
+    for i in test_images:   
+        img = Image.open(i).convert('RGB')
+        img.save(i)
+        count += 1
+        if count % 250 == 0:
+            print(count)
+    
+    return
+
+def display_random_ims(num_ims, json_path, image_folder, fig_size = (20,20), text_on = True):
+    '''
+    PURPOSE: Display some number of images from a coco dataset, randomly selected
+    IN:
+        -num_ims: int indicating how many to display
+        -json_path: coco gt file
+        -image_folder: folder where images in json_path are located
+    OUT:
+        -figures with each randomly selected image and its annotations
+    
+    '''
+    
+    # open json at the start of the process
+    with open(json_path, 'r') as f:
+        gt = json.load(f)
+
+    # Get Color palette
+    pal = make_palette(gt)
+    
+    # Pick the image ids to display
+    ims = choose_random_ims(num_ims, gt)
+
+    # Process each image
+    for i in ims:
+        
+        images = gt['images']
+        for im in images:
+            if im['id'] == i:
+                im_name = im['file_name']
+
+        # Get annotations on this image
+        anns = anns_on_image(i, gt)
+        
+        # Display the image
+        im_path = image_folder + im_name
+        plt.figure()
+        f,ax = plt.subplots(1, figsize = fig_size)
+        img = plt.imread(im_path)
+        plt.imshow(img)
+        for a in anns:
+            b = a['bbox']
+            cat = a['category_id']
+            cat_name = get_category_gt(cat, gt)
+            rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = pal[cat-1], facecolor = "none")
+            if text_on:
+                plt.text(b[0], b[1], cat_name, ha = "left", color = 'w')
+            ax.add_patch(rect)
+        plt.title(im_name)
+        plt.show()
+    
+    return
+
+
+def display_random_dt(num_ims, gt_path, dt_path, image_folder, fig_size = (20,20), conf_thresh = 0.9):
+    '''
+    PURPOSE: Display some number of images from a coco dataset, randomly selected
+    IN:
+        -num_ims: int indicating how many to display
+        -json_path: coco gt file
+        -image_folder: folder where images in json_path are located
+    OUT:
+        -figures with each randomly selected image and its annotations
+    '''
+    with open(gt_path, 'r') as f:
+        gt_content = json.load(f)
+
+    # Get Color palette
+    pal = make_palette(gt_content)
+    
+    # Pick the image ids to display
+    ims = choose_random_ims(num_ims, gt_content)
+    
+    with open(gt_path, 'r') as f:
+        gt = json.load(f)
+        
+    # Process each image
+    for i in ims:
+        
+        images = gt['images']
+        for im in images:
+            if im['id'] == i:
+                im_name = im['file_name']
+        
+        # Get annotations on this image
+        anns_dt = anns_on_image_dt(i, dt_path)
+        
+        # Display the image
+        im_path = image_folder + im_name
+        plt.figure()
+        f,ax = plt.subplots(1, figsize = fig_size)
+        img = plt.imread(im_path)
+        plt.imshow(img)
+        for a in anns_dt:
+            b = a['bbox']
+            cat = a['category_id']
+            conf = a['score']
+            if conf >= conf_thresh:
+                cat_name = get_category_gt(cat, gt)
+                rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = pal[cat-1], facecolor = "none", ls = '--')
+                plt.text(b[0], b[1], cat_name, ha = "left", color = 'w')
+                ax.add_patch(rect)
+        plt.show()
+    
+    return  
+
+def display_random_gt_dt(num_ims, gt_path, dt_path, image_folder, fig_size = (20,20), conf_thresh = 0.9):
+    '''
+    PURPOSE: Display some number of images from a coco dataset, randomly selected
+    IN:
+        -num_ims: int indicating how many to display
+        -json_path: coco gt file
+        -image_folder: folder where images in json_path are located
+    OUT:
+        -figures with each randomly selected image and its annotations
+    '''
+
+    with open(gt_path, 'r') as f:
+        gt_content = json.load(f)
+
+    # Get Color palette
+    pal = make_palette(gt_content)
+    
+    # Pick the image ids to display
+    ims = choose_random_ims(num_ims, gt_content)
+    
+    with open(gt_path, 'r') as f:
+        gt = json.load(f)
+        
+    # Process each image
+    for i in ims:
+        
+        images = gt['images']
+        for im in images:
+            if im['id'] == i:
+                im_name = im['file_name']
+        
+        # Get annotations on this image
+        anns_dt = anns_on_image_dt(i, dt_path)
+        anns_gt = anns_on_image(i, gt_content)
+        
+        # Display the image
+        im_path = image_folder + im_name
+        plt.figure()
+        f,ax = plt.subplots(1, figsize = fig_size)
+        img = plt.imread(im_path)
+        plt.imshow(img)
+        for a in anns_dt:
+            b = a['bbox']
+            cat = a['category_id']
+            conf = a['score']
+            if conf >= conf_thresh:
+                cat_name = get_category_gt(cat, gt)
+                rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = pal[cat-1], facecolor = "none", ls = '--')
+                plt.text(b[0], b[1], cat_name, ha = "left", color = 'w')
+                ax.add_patch(rect)
+        for a in anns_gt:
+            b = a['bbox']
+            cat = a['category_id']
+            cat_name = get_category_gt(cat, gt)
+            rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = pal[cat-1], facecolor = "none", ls = '-')
+            plt.text(b[0], b[1], cat_name, ha = "right", color = 'b')
+            ax.add_patch(rect)
+        plt.show()
+    
+    return
+
+def experiment_from_percentage(percentage, img_dir, new_img_dir, gt, new_gt_path):
+    '''
+    IN: 
+       - percentage: int, representing the percentage (out of 100) 
+                     of the images you would like to keep
+       - img_dir: str, image directory
+       - new_img_dir: str, location you'd like the new set of images
+       - gt: str, path to coco formatted json ground truth
+       - new_gt: str, path to new gt location
+    OUT: a new experiment ready to go in the specified locations
+    PURPOSE: Use to create a new experimental directroy with a % of your data for 
+    faster testing of other procedures on a given dataset
+    '''
+    # Get a list of new images
+    ims_percentage = get_im_list_percentage(percentage, img_dir)
+
+    # Copy the list to the new location
+    for f in ims_percentage:
+        src = img_dir + f
+        dst = new_img_dir + f
+        shutil.copy2(src, dst)
+
+    # Make a new gt file
+    gt_from_im_list(gt, ims_percentage, new_gt_path)
+
+    return
 
 def get_anns_in_box(box, anns):
     b_anns = []
@@ -100,82 +411,6 @@ def get_anns_in_box(box, anns):
             b_anns.append(new_a)
     return b_anns 
 
-def show_chip_anns(img, anns, gt_path):
-    '''
-    IN:
-        -img: pixels of image chip to be displayed
-        -anns: annotations relative to this image
-    OUT: display of that chip and annotations
-    '''
-    with open(gt_path, 'r') as f:
-        gt_content = json.load(f)
-
-    # Get Color palette
-    pal = make_palette(gt_content)
-    
-    # Show image on figure
-    plt.figure()
-    f,ax = plt.subplots(1, figsize = (10,10))
-    plt.imshow(img)
-    
-    # Add annotations
-    for a in anns:
-        b = a['bbox']
-        cat = a['category_id']
-        cat_name = get_category_gt(cat, gt_content)
-        rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = pal[cat-1], facecolor = "none")
-        plt.text(b[0], b[1], cat_name, ha = "left", color = 'w')
-        ax.add_patch(rect)
-    plt.show()
-    return
-
-def get_im_ids(gt_json):
-    '''
-    IN: gt coco json file
-    OUT: list of all int image ids in that file
-    '''
-    im_ids = []
-    
-    # Open file
-    with open(gt_json, 'r') as f:
-        gt = json.load(f)
-        
-    images = gt['images']
-    
-    # Gather image id from every image
-    for i in images:
-        im_ids.append(i['id'])
-    
-    # Double check that it is unique
-    im_ids = list(set(im_ids))
-    
-    return im_ids
-
-
-def get_category_gt(i, gt):
-    '''
-    IN: 
-        -i: int of 'category_id' you would like identified
-        -categories: 'categories' section of coco json
-        - gt: loaded coco gt information
-    OUT: 
-        -name of object category, or "none" if the category isn't present
-    '''
-        
-    categories = gt['categories']
-    
-    for c in categories:
-        if c['id'] == i:
-            return c['name']
-    return "None"
-
-def make_palette(contents):
-    categories = contents['categories']
-    
-    palette = sns.hls_palette(len(categories))
-        
-    return palette
-
 def get_category(i, categories):
     '''
     IN: 
@@ -188,7 +423,7 @@ def get_category(i, categories):
         if c['id'] == i:
             return c['name']
     return "None"
-        
+
 def get_category_counts(json_path):
     '''
     IN: json_path: path to coco json gt file
@@ -214,6 +449,172 @@ def get_category_counts(json_path):
     
     return cat_counts
 
+def get_category_id_from_name(cat_name, gt_content):
+    '''
+    IN: 
+      - cat_name: str, category name from coco json
+      - gt_content: json contents of coco gt file
+    OUT: cat_id: int, category id for that named category
+    '''
+
+    for c in gt_content['categories']:
+        if c['name'] == cat_name:
+            return c['id']
+    return None
+
+def get_image_paths(image_folder):
+    # Image paths
+    folders = os.listdir(image_folder)
+    folders = [image_folder + f + '/' for f in folders]
+    image_paths = []
+    for f in folders:
+        images = os.listdir(f)
+        images = [f + i for i in images]
+        image_paths.extend(images)
+    
+    return image_paths
+
+def get_category_gt(i, gt):
+    '''
+    IN: 
+        -i: int of 'category_id' you would like identified
+        -categories: 'categories' section of coco json
+        - gt: loaded coco gt information
+    OUT: 
+        -name of object category, or "none" if the category isn't present
+    '''
+        
+    categories = gt['categories']
+    
+    for c in categories:
+        if c['id'] == i:
+            return c['name']
+    return "None" 
+
+def get_im_ids(gt_json):
+    '''
+    IN: gt coco json file
+    OUT: list of all int image ids in that file
+    '''
+    im_ids = []
+    
+    # Open file
+    with open(gt_json, 'r') as f:
+        gt = json.load(f)
+        
+    images = gt['images']
+    
+    # Gather image id from every image
+    for i in images:
+        im_ids.append(i['id'])
+    
+    # Double check that it is unique
+    im_ids = list(set(im_ids))
+    
+    return im_ids
+
+def get_im_id_from_name(im_name, gt_content):
+    images = gt_content['images']
+
+    for i in images:
+        if i['file_name'] == im_name:
+            return i['id']
+    print('Missing Image', im_name)
+    return None
+
+def get_im_name_from_id(im_id, gt_content):
+    images = gt_content['images']
+
+    for i in images:
+        if i['id'] == im_id:
+            return i['file_name']
+
+def get_im_list_percentage(percentage, image_dir):
+    '''
+    IN: 
+       - percentage: int, representing the percentage (out of 100) 
+                     of the images you would like to keep
+       - image_dir: str, image directory
+    OUT: 
+       - keep_list: list of str, images to keep
+    PURPOSE: Use to create a new ground truth file with a % of your data for 
+    faster testing of other procedures on a given dataset
+    '''
+    im_list = os.listdir(image_dir)
+    keep_val = int(len(im_list)*(percentage/100.0))
+    random.shuffle(im_list)
+    keep_list = im_list[:keep_val]
+
+    return keep_list
+
+
+def gt_from_im_folder(full_gt, img_folder, new_gt_path):
+    # Read in full gt
+    with open(full_gt, 'r') as f:
+        gt = json.load(f)
+
+    # Initialize key storage containers
+    contents = gt.copy()
+    contents['images'] = []
+    contents['annotations'] = []
+    images = []
+    annotations = []
+
+    # Process one image at a time
+    ims = os.listdir(img_folder)
+
+    for image in tqdm(ims, desc = 'building annotations file'):
+        i = int(image.split('_')[0])
+        anns = anns_on_image(i, gt) 
+        annotations.extend(anns)
+        for im_info in gt['images']:
+            if im_info['id'] == i:
+                images.append(im_info)
+
+    # Load new data into appropriate format and save
+    contents['images'] = images
+    contents['annotations'] = annotations
+
+    if os.path.exists(new_gt_path):
+        os.remove(new_gt_path)
+
+    with open(new_gt_path, 'w') as f:
+        json.dump(contents, f)
+
+    return
+
+def gt_from_im_list(full_gt, img_list, new_gt_path):
+    # Read in full gt
+    with open(full_gt, 'r') as f:
+        gt = json.load(f)
+
+    # Initialize key storage containers
+    contents = gt.copy()
+    contents['images'] = []
+    contents['annotations'] = []
+    images = []
+    annotations = []
+
+    # Process one image at a time
+    for image in tqdm(img_list):
+        i = get_im_id_from_name(image, gt)
+        anns = anns_on_image(i, gt) 
+        annotations.extend(anns)
+        for im_info in gt['images']:
+            if im_info['id'] == i:
+                images.append(im_info)
+
+    # Load new data into appropriate format and save
+    contents['images'] = images
+    contents['annotations'] = annotations
+
+    if os.path.exists(new_gt_path):
+        os.remove(new_gt_path)
+
+    with open(new_gt_path, 'w') as f:
+        json.dump(contents, f)
+
+    return
 
 def json_fewer_cats(old_json, cat_list, ims_no_anns = False, renumber_cats = True):
     '''
@@ -303,162 +704,216 @@ def json_fewer_cats(old_json, cat_list, ims_no_anns = False, renumber_cats = Tru
     
     return new_name
 
-def anns_on_image(im_id, contents):
+def json_images(gt_json_path):
     '''
-    IN: 
-        - im_id: int id for 'id' in 'images' of coco json
-        - json_path: path to coco gt json
-    OUT:
-        - on_image: list of annotations on the given image
+    Purpose: return a list of image paths in a specified json
     '''
-    
-    # Pull out annotations
-    anns = contents['annotations']
-    
-    # Create list of anns on this image
-    on_image = []
-    for a in anns:
-        if a['image_id'] == im_id:
-            on_image.append(a)
-    
-    return on_image
-
-def anns_on_image_dt(im_id, json_path):
-    '''
-    IN: 
-        - im_id: int id for 'id' in 'images' of coco json
-        - json_path: path to coco gt json
-    OUT:
-        - on_image: list of annotations on the given image
-    '''
-    # Open json
-    with open(json_path, 'r') as f:
-        contents = json.load(f)
-    
-    # Create list of anns on this image
-    on_image = []
-    for a in contents:
-        if a['image_id'] == im_id:
-            on_image.append(a)
-    
-    return on_image
-
-def choose_random_ims(num_ims, contents):
-    '''
-    IN:
-        -num_ims: int number of image ids desired
-        -contents: coco json contents
-    OUT:
-        -list of num_ims random image ids from the input json
-    '''
-    
-    # Pull out key section
-    images = contents['images']
-    
-    # Get a list of all image ids in the json
-    all_ims = []
-    for i in images:
-        all_ims.append(i['id'])
-    
-    # Enusre there are no duplicates in the list
-    all_ims = list(set(all_ims))
-    
-    # Shuffle the list
-    random.shuffle(all_ims)
-    
-    # Create a smaller list of the num_ims requested
-    rand_ims = all_ims[:num_ims]
-    
-    return rand_ims
-
-def display_random_ims(num_ims, json_path, image_folder, fig_size = (20,20), text_on = True):
-    '''
-    PURPOSE: Display some number of images from a coco dataset, randomly selected
-    IN:
-        -num_ims: int indicating how many to display
-        -json_path: coco gt file
-        -image_folder: folder where images in json_path are located
-    OUT:
-        -figures with each randomly selected image and its annotations
-    
-    '''
-    
-    # open json at the start of the process
-    with open(json_path, 'r') as f:
+    with open(gt_json_path, 'r') as f:
         gt = json.load(f)
-
-    # Get Color palette
-    pal = make_palette(gt)
     
-    # Pick the image ids to display
-    ims = choose_random_ims(num_ims, gt)
+    images = gt['images']
+    im_paths = []
+    for i in images:
+        im_paths.append(i['file_name'])
 
-    # Process each image
-    for i in ims:
-        
-        images = gt['images']
-        for im in images:
-            if im['id'] == i:
-                im_name = im['file_name']
+    return im_paths
 
-        # Get annotations on this image
-        anns = anns_on_image(i, gt)
-        
-        # Display the image
-        im_path = image_folder + im_name
-        plt.figure()
-        f,ax = plt.subplots(1, figsize = fig_size)
-        img = plt.imread(im_path)
-        plt.imshow(img)
-        for a in anns:
-            b = a['bbox']
-            cat = a['category_id']
-            cat_name = get_category_gt(cat, gt)
-            rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = pal[cat-1], facecolor = "none")
-            if text_on:
-                plt.text(b[0], b[1], cat_name, ha = "left", color = 'w')
-            ax.add_patch(rect)
-        plt.title(im_name)
-        plt.show()
-    
+def load_test_train_split(test_gt, image_folder):
+    test_ims = json_images(test_gt)
+
+    test_folder = image_folder.replace('train', 'test')
+
+    if not os.path.exists(test_folder):
+        os.mkdir(test_folder)
+
+    for i in test_ims:
+        dst = test_folder + i
+        src = image_folder + i
+
+        shutil.move(src, dst)
+
     return
 
-def display_im_anns(im_id, json_path, image_folder, fig_size = (20,20)):
+def make_exp_by_percentage(data_tag, keep_percent, ims_list, anns_list):
     '''
-    PURPOSE: Display some image with annotations from coco dataset
     IN:
-        -im_id: int id of image from coco 'images' section
-        -json_path: coco gt file
-        -image_folder: folder where images in json_path are located
-    OUT:
-        -figures with each randomly selected image and its annotations
+      - data_tag: str, describes the dataset
+      - keep_percent: int, percentage of each set of images to keep
+      - ims_list: list of str, paths to images (same order as anns_list)
+      - anns_list: list of str, paths to annotation files (same order as ims_list)
+    OUT: None
     '''
-    with open(json_path, 'r') as f:
-        contents = json.load(f)
-   
-    # Get annotations on this image
-    anns = anns_on_image(im_id, contents)
-    
-    with open(json_path, 'r') as f:
-        gt = json.load(f)
-        
-    images = gt['images']
-    for im in images:
-        if im['id'] == im_id:
-            im_name = im['file_name']
 
-    # Display the image
-    im_path = image_folder + im_name
+    # make new experimental directory
+    new_exp_dir = f'{data_tag}_mini_{keep_percent}'
+
+    if not os.path.exists(new_exp_dir):
+        os.mkdir(new_exp_dir)
+
+    for i, anns in enumerate(anns_list):
+        ### Images ###
+        # get a list of images to keep
+        ims = os.listdir(ims_list[i])
+        random.shuffle(ims)
+        keep_ims = int(len(ims)*(float(keep_percent/100.0)))
+        new_ims = ims[:keep_ims]
+
+        # create a new image directory
+        new_image_dir = f'{new_exp_dir}/{ims_list[i]}'
+        if not os.path.exists(new_image_dir):
+            os.mkdir(new_image_dir)
+        # move the images
+        for im in tqdm(new_ims, desc = f'moving images'):
+            src = ims_list[i] + im
+            dst = new_image_dir + im
+            shutil.copy2(src, dst)
+
+        ### Annotations ###
+        new_ann_path = f'{new_exp_dir}/{anns}'
+        gt_from_im_folder(anns, new_image_dir, new_ann_path)
+
+def make_cat_ids_match(src_anns, match_anns):
+    '''
+    IN: 
+      - src_anns: str, path to the annotations whose category ids will provide
+                  the mapping
+      - match_anns: str, path to annotations whose categories will be remapped
+    OUT: None, the categories will be remapped in place
+    PURPOSE: Given two sets of coco annotations whose categories match, 
+    ensure that the ids of each category are the same by forcing 
+    match_anns categories to match src_anns categories
+    '''
+    # Open the annotations
+    with open(src_anns, 'r') as f:
+        src_gt = json.load(f)
+    with open(match_anns, 'r') as f:
+        match_gt = json.load(f)
+    
+    # Get the lists of categories
+    src_cats = src_gt['categories']
+    match_cats = match_gt['categories']
+
+    # Create a mapping from one set of ids to the other
+    cat_map = {}
+    for c in match_cats:
+        cat_map[c['id']] = get_category_id_from_name(c['name'], src_gt)
+
+    # Remap the annotations in match_anns
+    new_annotations = []
+    for a in match_gt['annotations']:
+        new_a = a.copy()
+        new_a['category_id'] = cat_map[a['category_id']]
+        new_annotations.append(new_a)
+    
+    match_gt['annotations'] = new_annotations
+    match_gt['categories'] = src_cats
+    
+    # Save out a new file
+    os.remove(match_anns)
+    with open(match_anns, 'w') as f:
+        json.dump(match_gt, f)
+
+    return 
+
+def make_palette(contents):
+    categories = contents['categories']
+    
+    palette = sns.hls_palette(len(categories))
+        
+    return palette
+
+def map_to_supercategories(anns, new_fp):
+    '''
+    PURPOSE: Given some inout coco json, map all the annotations to their 
+    supercategories for a more generalized experiment
+    IN:
+      - ann: str, fp to coco annotation file
+      - new_fp: str, fp to new coco annotation file
+    
+    OUT: Nothing, the new file will be created at the specified path
+    '''
+
+    # open the annotations
+    with open(anns, 'r') as f:
+        gt = json.load(f)
+    
+    ### Categories ###
+    old_cats = gt['categories']
+
+    # create the new set of categories
+    new_cs = []
+    new_cats = []
+
+    for c in old_cats:
+      new_c = c['supercategory']
+      new_cs.append(new_c)
+    # sort the list of possible categories so they always end up in a predictable order
+    new_cs = sorted(list(set(new_cs)))
+
+    for i, c in enumerate(new_cs):
+      cat = {'id': i + 1, 'name': c, 'supercategory': 'None'}
+      new_cats.append(cat)
+
+    # ### Annotations ###
+    old_anns = gt['annotations']
+    new_anns = []
+
+
+    for a in tqdm(old_anns):
+        new_ann = a.copy()
+        a_cat = a['category_id']
+        for c in old_cats:
+            if c['id'] == a_cat:
+                a_cat_name = c['supercategory']
+                for nc in new_cats:
+                    if nc['name'] == a_cat_name:
+                        a_cat_id = nc['id']
+                        new_ann['category_id'] = a_cat_id
+                        new_anns.append(new_ann)
+
+    ### New File ###
+    # Create new json, with blank annotations
+    new_json = gt.copy()
+    new_json['annotations'] = new_anns
+    new_json['categories'] = new_cats
+
+    # ensure the fp does not already exist
+    if os.path.exists(new_fp):
+        os.remove(new_fp)
+
+    # write out new anns
+    with open(new_fp, 'w') as f:
+        json.dump(new_json, f)
+    
+    return 
+
+def show_chip_anns(img, anns, gt_path):
+    '''
+    IN:
+        -img: pixels of image chip to be displayed
+        -anns: annotations relative to this image
+    OUT: display of that chip and annotations
+    '''
+    with open(gt_path, 'r') as f:
+        gt_content = json.load(f)
+
+    # Get Color palette
+    pal = make_palette(gt_content)
+    
+    # Show image on figure
     plt.figure()
-    f,ax = plt.subplots(1, figsize = fig_size)
-    img = plt.imread(im_path)
+    f,ax = plt.subplots(1, figsize = (10,10))
     plt.imshow(img)
+    
+    # Add annotations
     for a in anns:
         b = a['bbox']
-        rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = 'r', facecolor = "none")
+        cat = a['category_id']
+        cat_name = get_category_gt(cat, gt_content)
+        rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = pal[cat-1], facecolor = "none")
+        plt.text(b[0], b[1], cat_name, ha = "left", color = 'w')
         ax.add_patch(rect)
     plt.show()
-    
     return
 
 def show_im_chips(im_id, gt, size):
@@ -524,12 +979,16 @@ def subchip_images(gt, image_folder, new_image_folder, chip_size):
         im_anns = anns_on_image(im_id, gt_og)
         
         # Open the image
-        im_name = image_folder + str(im_id) + '.tif'
+        im_str = get_im_name_from_id(im_id, gt_og)
+        im_name = image_folder + im_str
         if os.path.exists(im_name):
             img = plt.imread(im_name)
             
             # Get image dimensions
-            (x,y,c) = img.shape
+            try:
+              (x,y,c) = img.shape
+            except:
+              (x,y) = img.shape
             num_x = int(x/chip_size)
             num_y = int(y/chip_size)
             
@@ -573,8 +1032,11 @@ def subchip_images(gt, image_folder, new_image_folder, chip_size):
                                 plt.imsave(chip_path, image_chip)
                             except:
                                 continue
+            
                             
             images_processed += 1
+        else:
+            print(f'Issue with {im_id}')
         
     # Save out new gt file
     new_gt = gt_og.copy()
@@ -591,28 +1053,6 @@ def subchip_images(gt, image_folder, new_image_folder, chip_size):
     print('New images:', new_image_folder)
     
     return
-
-def find_im_path(im_id, image_paths):
-    
-    for i in image_paths:
-        image = i.split('/')[-1]
-        im_num = int(image.split('.')[0])
-        if im_num == im_id:
-            return i
-    
-    return "None"
-
-def get_image_paths(image_folder):
-    # Image paths
-    folders = os.listdir(image_folder)
-    folders = [image_folder + f + '/' for f in folders]
-    image_paths = []
-    for f in folders:
-        images = os.listdir(f)
-        images = [f + i for i in images]
-        image_paths.extend(images)
-    
-    return image_paths
 
 def subchip_images_colab(gt, image_folder, new_image_folder, chip_size):
     '''
@@ -718,90 +1158,6 @@ def subchip_images_colab(gt, image_folder, new_image_folder, chip_size):
     
     return gt_new_path
 
-def convert_imgs_rgb(folder):
-    '''
-    Purpose: force all images in folder to assume kosher image format
-    '''
-    test_images = os.listdir(folder)
-    test_images = [folder + i for i in test_images]
-    count  = 0
-    for i in test_images:   
-        img = Image.open(i).convert('RGB')
-        img.save(i)
-        count += 1
-        if count % 250 == 0:
-            print(count)
-    
-    return
-
-def gt_from_im_folder(full_gt, img_folder, new_gt_path):
-    # Read in full gt
-    with open(full_gt, 'r') as f:
-        gt = json.load(f)
-
-    # Initialize key storage containers
-    contents = gt.copy()
-    contents['images'] = []
-    contents['annotations'] = []
-    images = []
-    annotations = []
-
-    # Process one image at a time
-    ims = os.listdir(img_folder)
-
-    for image in ims:
-        i = int(image.split('_')[0])
-        anns = anns_on_image(i, gt) 
-        annotations.extend(anns)
-        for im_info in gt['images']:
-            if im_info['id'] == i:
-                images.append(im_info)
-
-    # Load new data into appropriate format and save
-    contents['images'] = images
-    contents['annotations'] = annotations
-
-    if os.path.exists(new_gt_path):
-        os.remove(new_gt_path)
-
-    with open(new_gt_path, 'w') as f:
-        json.dump(contents, f)
-
-    return
-
-def gt_from_im_list(full_gt, img_list, new_gt_path):
-    # Read in full gt
-    with open(full_gt, 'r') as f:
-        gt = json.load(f)
-
-    # Initialize key storage containers
-    contents = gt.copy()
-    contents['images'] = []
-    contents['annotations'] = []
-    images = []
-    annotations = []
-
-    # Process one image at a time
-    for image in img_list:
-        i = int(image.split('_')[0].replace('maksssksksss', '').split('.')[0])
-        anns = anns_on_image(i, gt) 
-        annotations.extend(anns)
-        for im_info in gt['images']:
-            if im_info['id'] == i:
-                images.append(im_info)
-
-    # Load new data into appropriate format and save
-    contents['images'] = images
-    contents['annotations'] = annotations
-
-    if os.path.exists(new_gt_path):
-        os.remove(new_gt_path)
-
-    with open(new_gt_path, 'w') as f:
-        json.dump(contents, f)
-
-    return
-
 def test_train_split(chip_folder, test_percentage, gt, chip_size):
     
     all_chips = os.listdir(chip_folder)
@@ -826,177 +1182,6 @@ def test_train_split(chip_folder, test_percentage, gt, chip_size):
 
     print(train_data_name, test_data_name)
     return train_data_name, test_data_name
-
-def json_images(gt_json_path):
-    '''
-    Purpose: return a list of image paths in a specified json
-    '''
-    with open(gt_json_path, 'r') as f:
-        gt = json.load(f)
-    
-    images = gt['images']
-    im_paths = []
-    for i in images:
-        im_paths.append(i['file_name'])
-
-    return im_paths
-
-def check_for_parity(train_gt_path, test_gt_path, chip_dir):
-    '''
-    Purpose: determine if all the images in a defined train/test split
-    exist within a specified folder
-    '''
-    # Get a list of all chips in the split
-    test_ims = json_images(test_gt_path)
-    train_ims = json_images(train_gt_path)
-
-    former_ims = test_ims.copy()
-    former_ims.extend(train_ims)
-
-    # List of images in the folder
-    new_ims = os.listdir(chip_dir)
-
-    # Check if all images in split are in folder
-    # And all ims in folder are in split
-    they_match = True
-
-    for i in new_ims:
-        if i not in former_ims:
-            they_match = False
-
-    for i in former_ims:
-        if i not in new_ims:
-            they_match = False
-
-    # Print results
-    if they_match:
-        print("Images in these jsons and the specified folder match")
-    else:
-        print("These images don't quite match. Sad.")
-                     
-    return they_match
-
-def load_test_train_split(test_gt, image_folder):
-    test_ims = json_images(test_gt)
-
-    test_folder = image_folder.replace('train', 'test')
-
-    if not os.path.exists(test_folder):
-        os.mkdir(test_folder)
-
-    for i in test_ims:
-        dst = test_folder + i
-        src = image_folder + i
-
-        shutil.move(src, dst)
-
-    return
-
-
-def display_random_gt_dt(num_ims, gt_path, dt_path, image_folder, fig_size = (20,20), conf_thresh = 0.9):
-    '''
-    PURPOSE: Display some number of images from a coco dataset, randomly selected
-    IN:
-        -num_ims: int indicating how many to display
-        -json_path: coco gt file
-        -image_folder: folder where images in json_path are located
-    OUT:
-        -figures with each randomly selected image and its annotations
-    '''
-
-    with open(gt_path, 'r') as f:
-        gt_content = json.load(f)
-
-    # Get Color palette
-    pal = make_palette(gt_content)
-    
-    # Pick the image ids to display
-    ims = choose_random_ims(num_ims, gt_content)
-    
-    with open(gt_path, 'r') as f:
-        gt = json.load(f)
-        
-    # Process each image
-    for i in ims:
-        
-        images = gt['images']
-        for im in images:
-            if im['id'] == i:
-                im_name = im['file_name']
-        
-        # Get annotations on this image
-        anns_dt = anns_on_image_dt(i, dt_path)
-        
-        # Display the image
-        im_path = image_folder + im_name
-        plt.figure()
-        f,ax = plt.subplots(1, figsize = fig_size)
-        img = plt.imread(im_path)
-        plt.imshow(img)
-        for a in anns_dt:
-            b = a['bbox']
-            cat = a['category_id']
-            conf = a['score']
-            if conf >= conf_thresh:
-                cat_name = get_category_gt(cat, gt)
-                rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = pal[cat-1], facecolor = "none", ls = '--')
-                #plt.text(b[0], b[1], cat_name, ha = "left", color = 'w')
-                ax.add_patch(rect)
-        plt.show()
-    
-    return
-
-def display_random_dt(num_ims, gt_path, dt_path, image_folder, fig_size = (20,20), conf_thresh = 0.9):
-    '''
-    PURPOSE: Display some number of images from a coco dataset, randomly selected
-    IN:
-        -num_ims: int indicating how many to display
-        -json_path: coco gt file
-        -image_folder: folder where images in json_path are located
-    OUT:
-        -figures with each randomly selected image and its annotations
-    '''
-    with open(gt_path, 'r') as f:
-        gt_content = json.load(f)
-
-    # Get Color palette
-    pal = make_palette(gt_content)
-    
-    # Pick the image ids to display
-    ims = choose_random_ims(num_ims, gt_content)
-    
-    with open(gt_path, 'r') as f:
-        gt = json.load(f)
-        
-    # Process each image
-    for i in ims:
-        
-        images = gt['images']
-        for im in images:
-            if im['id'] == i:
-                im_name = im['file_name']
-        
-        # Get annotations on this image
-        anns_dt = anns_on_image_dt(i, dt_path)
-        
-        # Display the image
-        im_path = image_folder + im_name
-        plt.figure()
-        f,ax = plt.subplots(1, figsize = fig_size)
-        img = plt.imread(im_path)
-        plt.imshow(img)
-        for a in anns_dt:
-            b = a['bbox']
-            cat = a['category_id']
-            conf = a['score']
-            if conf >= conf_thresh:
-                cat_name = get_category_gt(cat, gt)
-                rect = patches.Rectangle((b[0], b[1]), b[2], b[3], edgecolor = pal[cat-1], facecolor = "none", ls = '--')
-                plt.text(b[0], b[1], cat_name, ha = "left", color = 'w')
-                ax.add_patch(rect)
-        plt.show()
-    
-    return  
 
 def train_val_test_split(image_folder, gt, val_precentage = 0.1, test_percentage = 0.2, data_tag = ""):
     

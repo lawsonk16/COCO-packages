@@ -195,21 +195,29 @@ def get_transform():
 def collate_fn(batch):
     return tuple(zip(*batch))
 
-def detector_dts(model, data_loader, dt_path, iuo_nms):
+def detector_dts(model, model_path, data_loader, iou_nms, data_split):
     '''
     Purpose: Test a loaded model on a given data set
     TODO: make a better save file name to keep track of model/results relationships
     '''
     # Establish device settings and set model in appropriate mode
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+    model.to(device)
     model.eval()
+
+    # Create a named path for your detections
+    dt_path = name_dts(model_path, data_split, iou_nms)
+
+    if os.path.exists(dt_path):
+        print('Detections already produced')
+        return dt_path
 
     detections = []
     i = 0
 
     # Evaluate all images
     with torch.no_grad():
-        for imgs, annotations in data_loader:
+        for imgs, annotations in tqdm(data_loader, desc = f'Getting {data_split} detections'):
             # Get data ready to evaluate
             imgs = list(img.to(device) for img in imgs)
             annotations = [{k: v.to(device) for k, v in t.items()} for t in annotations]
@@ -221,7 +229,7 @@ def detector_dts(model, data_loader, dt_path, iuo_nms):
             im_id = int(annotations[0]['image_id'])
 
             # Perform non-max suppression to remove overlapping detections
-            nms_indices = torchvision.ops.nms(d[0]['boxes'], d[0]['scores'], iuo_nms).tolist()
+            nms_indices = torchvision.ops.nms(d[0]['boxes'], d[0]['scores'], iou_nms).tolist()
 
             # Get boxes, labels, scores 
             boxes = d[0]['boxes'].tolist()
@@ -248,7 +256,7 @@ def detector_dts(model, data_loader, dt_path, iuo_nms):
     with open(dt_path, 'w') as f:
         json.dump(detections, f) 
 
-    return
+    return dt_path
 
 def get_fasterrcnn(num_classes, pre_trained, resnet_depth = 50):
     try:
@@ -378,73 +386,20 @@ def train_one_epoch(model, data_loader, optimizer, device, path):
     torch.save(model.state_dict(), path)
     return model, path, optimizer
 
-def detector_dts(model, data_loader, dt_path, iuo_nms):
-    '''
-    Purpose: Test a loaded model on a given data set
-    TODO: make a better save file name to keep track of model/results relationships
-    '''
-    # Establish device settings and set model in appropriate mode
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
-    model.eval()
 
-    detections = []
-    i = 0
-
-    # Evaluate all images
-    with torch.no_grad():
-        for imgs, annotations in data_loader:
-            # Get data ready to evaluate
-            imgs = list(img.to(device) for img in imgs)
-            annotations = [{k: v.to(device) for k, v in t.items()} for t in annotations]
-
-            # Return detections
-            d = model(imgs)
-
-            # Pull this image's image ID
-            im_id = int(annotations[0]['image_id'])
-
-            # Perform non-max suppression to remove overlapping detections
-            nms_indices = torchvision.ops.nms(d[0]['boxes'], d[0]['scores'], iuo_nms).tolist()
-
-            # Get boxes, labels, scores 
-            boxes = d[0]['boxes'].tolist()
-            labels = d[0]['labels'].tolist()
-            scores = d[0]['scores'].tolist()
-
-            # Only process results which survive nms
-            for a in nms_indices:
-                # re-factor bbox and get detection area
-                bbox = boxes[a]
-                new_bbox = [int(bbox[0]), int(bbox[1]), int(bbox[2] - bbox[0]), int(bbox[3] - bbox[1])]
-                area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-
-                # Create coco-style detection
-                detection = {'id': i, 'image_id': im_id,
-                            'category_id': labels[a], 'score' : scores[a],
-                            'bbox': new_bbox, 'area': area, 'iscrowd': 0}
-                detections.append(detection)
-                i += 1   
-
-    # Save out detections
-    if os.path.exists(dt_path):
-        os.remove(dt_path)  
-    with open(dt_path, 'w') as f:
-        json.dump(detections, f) 
-
-    return
-
-def train_fasterrcnn(model, model_path, data_loaders, optim, lr, mom, wd, epochs):
+def train_fasterrcnn(model, model_path, data_loaders, optim, lr, mom, wd, epochs, start_eval_epoch, eval_freq, iou_nms, save_freq):
     
     ### Initialization ###
-    # Defining data structures to store train and test info for linear classifier
+    # Defining data structures to store train and test info 
     losses_train = []
     accs_train = []
     losses_val = []
     accs_val = []
     best_model_weights = model.state_dict()
-    starting_epoch = 0
+    current_epoch = 0
 
     # set to monitor performance
+    lowest_val_loss = 9999999999999999999
     lowest_train_loss = 9999999999999999999
     
     # load any previous training
@@ -455,7 +410,7 @@ def train_fasterrcnn(model, model_path, data_loaders, optim, lr, mom, wd, epochs
         best_model_weights = model_info['weights']
         model.load_state_dict(best_model_weights)
         # epoch
-        starting_epoch = model_info['epochs_trained']
+        current_epoch = model_info['epochs_trained']
         # loss
         losses_train = model_info['losses train']
         losses_val = model_info['losses val']
@@ -463,9 +418,16 @@ def train_fasterrcnn(model, model_path, data_loaders, optim, lr, mom, wd, epochs
         accs_train = model_info['acc train']
         accs_val = model_info['acc val']
         # lowest train loss
-        lowest_train_loss = model_info['least train loss']
+        lowest_val_loss = min(losses_val)
+        lowest_train_loss = min(losses_train)
 
-        print(f'Loading {starting_epoch} epochs of training for fasterrcnn')
+        print(f'Loading {current_epoch} epochs of training for fasterrcnn')
+    
+    # Define path to save out models over time
+    historic_weights = '/'.join(model_path.split('/')[:-1]) + '/historic_weights/'
+
+    if not os.path.exists(historic_weights):
+        os.mkdir(historic_weights)
 
     # unpack data loaders
     train_loader, val_loader = data_loaders
@@ -483,13 +445,14 @@ def train_fasterrcnn(model, model_path, data_loaders, optim, lr, mom, wd, epochs
     elif optim == 'Adam':
         optimizer = torch.optim.Adam(params, lr=lr)
 
-    for epoch in range(starting_epoch, epochs):
+    for epoch in range(current_epoch, epochs):
+        
         print(f'Training epoch {epoch + 1} of {epochs}')
         ### Training ###
         model.train()
         epoch_train_losses = []
         # Process all data in the data loader 
-        for imgs, annotations in tqdm(train_loader):
+        for imgs, annotations in tqdm(train_loader, desc = 'Training'):
             
             # Prepare images and annotations
             imgs = list(img.to(device) for img in imgs)
@@ -504,33 +467,64 @@ def train_fasterrcnn(model, model_path, data_loaders, optim, lr, mom, wd, epochs
             optimizer.zero_grad()
             losses.backward()
             optimizer.step()
-
+        
         # Train epoch done
         epoch_train_loss = np.mean(epoch_train_losses)
         losses_train.append(epoch_train_loss)
         
         ### Validation ###
-        # TBD
+        epoch_val_losses = []
+        # Process all data in the data loader 
+        for imgs, annotations in tqdm(val_loader, desc = 'Validation'):
+            
+            # Prepare images and annotations
+            imgs = list(img.to(device) for img in imgs)
+            annotations = [{k: v.to(device) for k, v in t.items()} for t in annotations]
+            
+            # Calculate loss 
+            with torch.no_grad():
+                loss_dict = model(imgs, annotations)
+            losses = sum(loss for loss in loss_dict.values())
+            epoch_val_losses.append(losses.cpu().detach().numpy())
 
+        # Val epoch done
+        epoch_val_loss = np.mean(epoch_val_losses)
+        losses_val.append(epoch_val_loss)
+
+        ### Evaluation and historic model saving ###
+        if epoch >= start_eval_epoch:
+            if epoch % eval_freq == (eval_freq-1):
+                hist_model_path = historic_weights + f'{epoch+1}_epochs'
+
+                print(f'Evalutation on epoch {epoch + 1}')
+                # val dts
+                detector_dts(model, model_path, val_loader, iou_nms, 'val')
+        
         ### Save Out ###
-        if epoch_train_loss < lowest_train_loss:
+        if epoch_val_loss < lowest_val_loss:
             best_model_weights = copy.deepcopy(model.state_dict())
             lowest_train_loss = epoch_train_loss
-            print(f'Lowest train loss: {lowest_train_loss}')
+            print(f'Lowest val loss: {lowest_val_loss}')
 
         # either way, save the model
         model_info = {'weights': best_model_weights,
                       'epochs_trained': epoch + 1,
-                      'least train loss': lowest_train_loss,
+                      'least val loss': lowest_val_loss,
                       'acc train': accs_train,
                       'acc val': accs_val,
                       'losses train': losses_train,
                       'losses val': losses_val}
+        # If this is an evaluation epoch, also save out the model
+        if epoch > 0:
+            if epoch % save_freq == (save_freq-1):
+                hist_model_path = historic_weights + f'{epoch+1}_epochs'
+                torch.save(model_info, hist_model_path)
+                print('Saved model history')
         torch.save(model_info, model_path)
 
     return losses_train
 
-def name_model(save_folder, num_classes, model_name, data_name, optim, lr, mom, wd, pretrained, batch_size):
+def name_model(exp_folder, data_name, data_split, resnet_backbone, batch_size, num_classes, optim, lr, mom, wd, pretrained):
     '''
     Purpose: Create a distinctive path for your model. If a model of this type,
     with this optimizer, etc has been trained before, start on the highest epoch 
@@ -551,25 +545,95 @@ def name_model(save_folder, num_classes, model_name, data_name, optim, lr, mom, 
     REPLACES: define_model_path
     '''
 
-    # Open the correct folder, creating it if necessry
-    model_folder = save_folder + model_name + '/'
-    if not os.path.exists(model_folder):
-        os.mkdir(model_folder)
+    # Name a folder for experiments with this dataset, creating it if necessary
+    data_folder = exp_folder + data_name + '/'
+    if not os.path.exists(data_folder):
+        os.mkdir(data_folder)
 
-    # Get a list of all current models
-    current_models = os.listdir(model_folder)
+    # Add a folder for this data split, creating it if necessary
+    split_folder = data_folder + data_split + '/'
+    if not os.path.exists(split_folder):
+        os.mkdir(split_folder)
+
+    # Add a folder for this kind of resnet backbone, creating it if necessary
+    model_name = f'resnet{resnet_backbone}fpn'
+    res_folder = split_folder + model_name + '/'
+    if not os.path.exists(res_folder):
+        os.mkdir(res_folder)
 
     # List all relevant parameters, in a fixed order after key id strings
-    path_params = [data_name, 'classes', num_classes, 
-                          'optim', optim, 'lr', lr, 'mom', mom, 'wd', wd,
-                          'pretrained', pretrained,
-                          'batch', batch_size]
+    path_params = ['classes', num_classes, 
+                   'optim', optim, 'lr', lr, 'mom', mom, 'wd', wd,
+                   'pretrained', pretrained,
+                   'batch', batch_size]
 
     # Ensure all params are saved as strings, then create a key to id this model config
     path_params = [str(p) for p in path_params]
     model_path = '_'.join(path_params).replace('.', 'p')
 
-    # Save definitive model path
-    path = model_folder + model_path + '.pt'
+    # Make Experiment Folder
+    exp_folder = res_folder + model_path + '/' 
+
+    if not os.path.exists(exp_folder):
+        os.mkdir(exp_folder)
+
+    path = exp_folder + 'best_weights.pt'
 
     return path
+
+def name_dts(model_path, data_split, iou_nms):
+    '''
+    Goal: Name a set of detections
+    '''
+    # load model information and model
+    if os.path.exists(model_path):
+        # load model information
+        model_info = torch.load(model_path)
+        # weights
+        best_model_weights = model_info['weights']
+        # epoch
+        starting_epoch = model_info['epochs_trained']
+
+    # define the path to the detection files for this model
+    dts_folder = '/'.join(model_path.split('/')[:-1]) + '/detections/'
+
+    if not os.path.exists(dts_folder):
+        os.mkdir(dts_folder)
+
+    iou_nms_str = str(iou_nms).replace('.','p')
+
+    dts_path = dts_folder + data_split + f'_{starting_epoch+1}_epochs_{iou_nms_str}_iou-nms.json'
+    
+    return dts_path
+
+def load_model(model, model_path):
+    
+    ### Initialization ###
+    
+    # load any previous training
+    if os.path.exists(model_path):
+        # load model information
+        model_info = torch.load(model_path)
+        # weights
+        best_model_weights = model_info['weights']
+        model.load_state_dict(best_model_weights)
+    
+    return model
+
+def get_most_recent_dts(model_path):
+    dt_path = '/'.join(model_path.split('/')[:-1]) + '/detections/'
+    all_dts = os.listdir(dt_path)
+    highest_epoch = 0
+    train_dts = ''
+    val_dts = ''
+    for dt in all_dts:
+        epoch = int(dt.split('_')[1])
+        if epoch > highest_epoch:
+            highest_epoch = epoch
+            if 'train' in dt:
+                train_dts = dt
+                val_dts = dt.replace('train', 'val')
+            else:
+                train_dts = dt.replace('val', 'train')
+                val_dts = dt
+    return dt_path + train_dts, dt_path + val_dts
