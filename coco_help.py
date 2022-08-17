@@ -8,6 +8,56 @@ import json
 from PIL import Image
 import shutil
 from tqdm import tqdm
+import numpy as np
+
+def add_gsd_to_chips(full_anns, chip_anns):
+
+    '''
+    PURPOSE: Given a set of full image annotations with gsd values and chipped
+    annotations without them, add the gsd values to the corresponding chipped
+    annotations for experimental use
+    IN:
+     - full_anns: str, 
+     - chip_anns: str,
+    OUT:
+     - chip_anns_gsd: str,
+    '''
+
+    with open(full_anns, 'r') as f:
+        data_full = json.load(f)
+    images_full = data_full['images']
+
+    with open(chip_anns, 'r') as f:
+        data_chip = json.load(f)
+    images_chip = data_chip['images']
+
+    new_images_c = []
+
+    # process each chipped image one by one
+    for i_c in tqdm(images_chip, desc = 'Adding GSD to Images'):
+        # copy the data
+        new_i_c = i_c.copy()
+
+        # get the full image info from the chip name
+        im_name_c = i_c['file_name']
+
+        full_im_id = int(im_name_c.split('_')[1])
+
+        # add gsd
+        new_i_c['gsd'] = get_im_gsd_from_id(full_im_id, data_full)
+        new_images_c.append(new_i_c)
+
+    data_chip['images'] = new_images_c
+
+    chip_anns_gsd = chip_anns.split('.')[0] + '_gsd.json'
+
+    if os.path.exists(chip_anns_gsd):
+        os.remove(chip_anns_gsd)
+
+    with open(chip_anns_gsd, 'w') as f:
+        json.dump(data_chip, f)
+
+    return chip_anns_gsd
 
 def anns_on_image(im_id, contents):
     '''
@@ -48,6 +98,58 @@ def anns_on_image_dt(im_id, json_path):
             on_image.append(a)
     
     return on_image
+
+def average_bboxes_from_centerpoints(anns_path, avg_img_gsd = None):
+    '''
+    PURPOSE: After finding average object sizes, and using bounding boxes to add
+             centerpoints (all to a coco annotation file), replace bounding boxes 
+             using image GSD and average object sizes to grow the centerpoints
+    IN:
+     - anns_path: str, path to coco annotations file
+     - avg_img_gsd: float or int, optional, average image size in dataset, 
+                    which will be used as a default if an image doesn't have 
+                    a noted GSD. 
+    OUT:
+     - new_anns_path: str, path to new annotation file
+    '''
+    
+    # open annotation file
+    with open(anns_path, 'r') as f:
+        content = json.load(f)
+
+    # if necessary, get average gsd
+    if avg_img_gsd == None:
+        avg_img_gsd = get_average_image_gsd(anns_path)
+    
+    # pull out key sections of file
+    anns = content['annotations']
+
+    # adjust bounding boxes based on centerpoints and object sizes
+    new_annotations = []
+    for a in tqdm(anns, desc = 'Creating Square Bboxes'):
+        new_a = a.copy()
+        [x,y] = a['centerpoint']
+        obj_size = get_obj_size_from_id(a['category_id'], content)
+        im_gsd = get_im_gsd_from_id(a['image_id'], content)
+        if im_gsd != None:
+            ob_h_w = int(obj_size/im_gsd)
+        else:
+            ob_h_w = int(obj_size/avg_img_gsd)
+        square_bbox = [x - (ob_h_w/2), y - (ob_h_w/2), ob_h_w, ob_h_w]
+        new_a['bbox'] = square_bbox
+        new_annotations.append(new_a)
+
+    content['annotations'] = new_annotations
+
+    new_anns_path = anns_path.split('.')[0] + '_square.json'
+
+    if os.path.exists(new_anns_path):
+        os.remove(new_anns_path)
+    
+    with open(new_anns_path, 'w') as f:
+        json.dump(content, f)
+
+    return new_anns_path
 
 def check_for_parity(train_gt_path, test_gt_path, chip_dir):
     '''
@@ -152,6 +254,48 @@ def classification_from_json(json_path, image_folder, classification_folder):
             if not os.path.exists(chip_path):
                 plt.imsave(chip_path, chip)
     return
+
+def convert_anns_centerpoint(anns_path, max_shift = 5):
+    '''
+    PURPOSE: Convert an annotation file with image-oriented bounding boxes to 
+             center point annotations instead
+    IN:
+     - anns_path: str, path to annotations
+     - max_shift: int, maximum distance the point may shift 
+    OUT:
+     - new_anns_path: str, path to new annotations
+    '''
+
+    # open the annotation file
+    with open(anns_path, 'r') as f:
+        ann_contents = json.load(f)
+    
+    # grab those annotations
+    annotations = ann_contents['annotations']
+
+    # add randomly shifted centerpoints to each annotation
+    new_anns = []
+    for a in annotations:
+        new_a = a.copy()
+        x1, y1, w, h = a['bbox']
+        x_c = x1 + int(w/2)
+        y_c = y1 + int(h/2)
+
+        new_a['centerpoint'] = random_shift_point([x_c, y_c], max_shift)
+        new_anns.append(new_a)
+
+    ann_contents['annotations'] = new_anns
+
+    # create and save new annotation file
+    new_anns_path = anns_path.split('.')[0] + f'_cp_{max_shift}.json'
+
+    if os.path.exists(new_anns_path):
+        os.remove(new_anns_path)
+    
+    with open(new_anns_path, 'w') as f:
+        json.dump(ann_contents, f)
+
+    return new_anns_path
 
 def convert_imgs_rgb(folder):
     '''
@@ -335,6 +479,73 @@ def display_random_gt_dt(num_ims, gt_path, dt_path, image_folder, fig_size = (20
     
     return
 
+def estimate_category_size(anns_path, write_out = False, matched_files = []):
+    '''
+    PURPOSE: Get average sizes in meters for each object category in a 
+             coco dataset and optionally add them to the file, with the option
+             to add the values to multiple files
+    IN:
+     - anns_path: str, path to coco annotation file
+     - write_out: boolean, whether or not to write the values into the coco file
+     - matched_files : list of strs, paths to other files to write our average 
+                       object sizes to
+    OUT:
+     - estimates: dict, contains information about each category keyed to its id
+    '''
+
+    # open annotation file
+    with open(anns_path, 'r') as f:
+        content = json.load(f)
+    
+    # pull out key sections of file
+    cats = content['categories']
+    anns = content['annotations']
+
+    # create dictionary for storing key info about objct sizes
+    estimates = {}
+    for c in cats:
+        estimates[c['id']] = {'name': c['name'], 'sizes': []}
+
+    # add the size of each indivdual object to the list for that category
+    for a in tqdm(anns):
+        bbox = a['bbox']
+
+        # get largest side of object
+        size = max(bbox[2:3])
+        im_gsd = get_im_gsd_from_id(a['image_id'], content)
+        if im_gsd != None:
+          size_m = size*im_gsd
+        estimates[a['category_id']]['sizes'].append(size_m)
+    
+    # add average sizes using size lists
+    for k,v in estimates.items():
+        avg = np.mean(v['sizes'])
+        name = v['name']
+        estimates[k]['average'] = avg
+
+    new_cats = []
+    if write_out:
+
+        for c in cats:
+            new_c = c.copy()
+            new_c['average_size'] = estimates[c['id']]['average']
+            new_cats.append(new_c)
+        content['categories'] = new_cats
+
+        os.remove(anns_path)
+
+        with open(anns_path, 'w') as f:
+            json.dump(content, f)
+        
+        for fp in matched_files:
+            with open(fp, 'r') as f:
+                f_contents = json.load(f)
+            f_contents['categories'] = new_cats
+            os.remove(fp)
+            with open(fp, 'w') as f:
+                json.dump(f_contents, f)
+    return estimates
+
 def experiment_from_percentage(percentage, img_dir, new_img_dir, gt, new_gt_path):
     '''
     IN: 
@@ -411,6 +622,28 @@ def get_anns_in_box(box, anns):
             b_anns.append(new_a)
     return b_anns 
 
+def get_average_image_gsd(anns_path):
+    '''
+    PURPOSE: Find the average GSD of the images in a coco ground truth file
+    IN:
+     - anns_path: str, path to coco annotation file
+    OUT:
+     - avg_img_gsd: float, average gsd of images in dataset
+    '''
+    with open(anns_path, 'r') as f:
+        content = json.load(f)
+    images = content['images']
+
+    gsd_vals = []
+
+    for i in images:
+        if i['gsd'] != None:
+            gsd_vals.append(i['gsd'])
+
+    avg_img_gsd = np.average(gsd_vals)
+
+    return avg_img_gsd
+
 def get_category(i, categories):
     '''
     IN: 
@@ -462,18 +695,6 @@ def get_category_id_from_name(cat_name, gt_content):
             return c['id']
     return None
 
-def get_image_paths(image_folder):
-    # Image paths
-    folders = os.listdir(image_folder)
-    folders = [image_folder + f + '/' for f in folders]
-    image_paths = []
-    for f in folders:
-        images = os.listdir(f)
-        images = [f + i for i in images]
-        image_paths.extend(images)
-    
-    return image_paths
-
 def get_category_gt(i, gt):
     '''
     IN: 
@@ -490,6 +711,37 @@ def get_category_gt(i, gt):
         if c['id'] == i:
             return c['name']
     return "None" 
+
+def get_image_paths(image_folder):
+    # Image paths
+    folders = os.listdir(image_folder)
+    folders = [image_folder + f + '/' for f in folders]
+    image_paths = []
+    for f in folders:
+        images = os.listdir(f)
+        images = [f + i for i in images]
+        image_paths.extend(images)
+    
+    return image_paths
+
+def get_im_gsd_from_id(im_id, gt_content):
+    '''
+    PURPOSE: Get the GSD of an image based on its id in a coco file
+    IN:
+     - im_id: int, image id for the image in question
+     - gt_content: the content from a coco ground truth file
+    OUT:
+     - pt: either the image's GSD or None if it isn'available
+    '''
+    images = gt_content['images']
+
+    for i in images:
+        if i['id'] == im_id:
+            return i['gsd']
+    print(f'GSD Missing: Image {im_id}')
+    return None
+
+
 
 def get_im_ids(gt_json):
     '''
@@ -546,6 +798,23 @@ def get_im_list_percentage(percentage, image_dir):
     keep_list = im_list[:keep_val]
 
     return keep_list
+
+def get_obj_size_from_id(cat_id, gt_content):
+    '''
+    PURPOSE: Get the average size of an object from a coco file, after 
+             estimate_category_size has been run on that annotation set
+    IN:
+     - cat_id: the integer id of a coco category
+     - gt_content: the content from a coco ground truth file
+    OUT:
+     - pt: Either the object's average size (float) or None if it isn't recorded
+    '''
+    cats = gt_content['categories']
+
+    for c in cats:
+        if c['id'] == cat_id:
+            return c['average_size']
+    return None
 
 
 def gt_from_im_folder(full_gt, img_folder, new_gt_path):
@@ -886,6 +1155,49 @@ def map_to_supercategories(anns, new_fp):
         json.dump(new_json, f)
     
     return 
+
+def random_shift_point(pt, max_shift = 5):
+    '''
+    PURPOSE: Shift a point at random
+    IN:
+     - pt: [x,y]
+     - max_shift: int, maximum distance the point may shift 
+    OUT:
+     - pt: [x,y]
+    '''
+    # unpack the point
+    x,y = pt
+
+    # define options
+    vert_opts = ['up', 'down', 'centered']
+    hori_opts = ['left', 'right', 'centered']
+
+    # randomly select a movement
+    v_d = random.choice(vert_opts)
+    h_d = random.choice(hori_opts)
+
+    # select shift amount
+    v_s = random.choice(range(1, max_shift+1))
+    h_s = random.choice(range(1, max_shift+1))
+
+    # move the point:
+    if v_d is 'up':
+        y += v_s
+    elif v_d is 'down':
+        y -= v_s
+
+    if h_d is 'right':
+        x += v_s
+    elif h_d is 'left':
+        x -= v_s
+  
+    # make sure there are no negatives
+    if x < 0:
+       x = 0
+    if y < 0:
+       y = 0
+
+    return [x,y]
 
 def show_chip_anns(img, anns, gt_path):
     '''
