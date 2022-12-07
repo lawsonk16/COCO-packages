@@ -9,6 +9,7 @@ from PIL import Image
 import shutil
 from tqdm import tqdm
 import numpy as np
+import torch
 
 def add_gsd_to_chips(full_anns, chip_anns):
 
@@ -351,6 +352,7 @@ def display_random_ims(num_ims, json_path, image_folder, fig_size = (20,20), tex
         plt.figure()
         f,ax = plt.subplots(1, figsize = fig_size)
         img = plt.imread(im_path)
+        channels = len(img.shape)
         plt.imshow(img)
         for a in anns:
             b = a['bbox']
@@ -741,6 +743,21 @@ def get_im_gsd_from_id(im_id, gt_content):
     print(f'GSD Missing: Image {im_id}')
     return None
 
+def get_im_info(im_id, gt_content):
+    '''
+    PURPOSE: Get the info of an image based on its id in a coco file
+    IN:
+     - im_id: int, image id for the image in question
+     - gt_content: the content from a coco ground truth file
+    OUT:
+     - i: either the image's info or None if it isn'available
+    '''
+    images = gt_content['images']
+
+    for i in images:
+        if i['id'] == im_id:
+            return i
+    return None
 
 
 def get_im_ids(gt_json):
@@ -815,6 +832,97 @@ def get_obj_size_from_id(cat_id, gt_content):
         if c['id'] == cat_id:
             return c['average_size']
     return None
+
+def gsd_norm(target_gsd, image_dir, ann_path, new_exp_dir):
+    # Create new experimental directory
+    if not os.path.exists(new_exp_dir):
+      os.mkdir(new_exp_dir)
+
+    new_im_dir = new_exp_dir + 'images/'
+    new_json = new_exp_dir + ann_path.split('_')[-1]
+
+    if not os.path.exists(new_im_dir):
+      os.mkdir(new_im_dir)
+
+    with open(ann_path, 'r') as f:
+      gt = json.load(f)
+    
+    new_gt = gt.copy()
+    new_gt['images'] = []
+    new_gt['annotations'] = []
+
+    im_ids = get_im_ids(ann_path)
+
+    for im_id in tqdm(im_ids):
+
+        im_info = get_im_info(im_id, gt)
+        
+        
+        new_im_info = im_info.copy()
+
+        #pull old image information
+        old_im_h = im_info['height']
+        old_im_w = im_info['width']
+        # Get old gsd
+        old_gsd = im_info['gsd']
+        
+        anns = anns_on_image(im_id, gt)
+        
+        try:
+            if old_gsd is not None:
+
+                # Create new image height and width
+                new_im_h = int(float((old_im_h*old_gsd)/target_gsd))
+                new_im_w = int(float((old_im_w*old_gsd)/target_gsd))
+
+                new_im_info['height'] = new_im_h
+                new_im_info['width'] = new_im_w
+                new_im_info['gsd'] = target_gsd
+
+                new_gt['images'].append(new_im_info)
+                
+                new_path = new_im_dir + im_info['file_name']
+                old_path = image_dir + im_info['file_name']
+                
+                img = Image.open(old_path)
+                
+                img = img.resize((new_im_w, new_im_h))
+                
+                img.save(new_path)
+
+                for a in anns:
+                    new_a = a.copy()
+
+                    # get current annotation bbox for each annotation
+                    [old_x1, old_y1, old_w, old_h] = a['bbox']
+
+                    # Created scaled versions of the bbox
+                    scaled_x1 = old_x1/old_im_w
+                    scaled_w = old_w/old_im_w
+
+                    scaled_y1 = old_y1/old_im_h
+                    scaled_h = old_h/old_im_h
+
+                    # Create new bbox
+                    x1 = scaled_x1 * new_im_w
+                    w = scaled_w * new_im_w
+
+                    y1 = scaled_y1 * new_im_h
+                    h = scaled_h * new_im_h
+
+                    new_a['bbox'] = [x1, y1, w, h]
+
+                    new_gt['annotations'].append(new_a)
+
+                
+        except:
+            print(im_id, 'problem')
+            
+
+    with open(new_json, 'w') as f:
+        json.dump(new_gt, f)
+
+    return
 
 
 def gt_from_im_folder(full_gt, img_folder, new_gt_path):
@@ -1156,6 +1264,42 @@ def map_to_supercategories(anns, new_fp):
     
     return 
 
+
+def plot_model_performance(model_path, title = ''):
+
+    model_info = torch.load(model_path)
+
+    val_losses = model_info['losses val']
+    train_losses = model_info['losses train']
+    val_stats = model_info['val stats']
+
+    map = []
+    x = []
+    precision = []
+    recall = []
+
+    for k, v in val_stats.items():
+        x.append(k)
+        map.append(v[0]['mAP'])
+        precision.append(v[0]['precision'])
+        recall.append(v[0]['recall'])
+
+    map = [a for y, a in sorted(zip(x, map))]
+    precision = [a for y, a in sorted(zip(x, precision))]
+    recall = [a for y, a in sorted(zip(x, recall))]
+    x = sorted(x)
+
+
+    plt.plot(range(0, len(val_losses)), val_losses, label = 'Validation Loss')
+    plt.plot(range(0, len(train_losses)), train_losses, label = 'Train Loss')
+    plt.plot(x, map, label = 'Mean Average Precision')
+    plt.plot(x, recall, label = 'Recall')
+    plt.plot(x, precision, label = 'Precision')
+    plt.legend(loc="upper right")
+    plt.title(title)
+
+    return
+
 def random_shift_point(pt, max_shift = 5):
     '''
     PURPOSE: Shift a point at random
@@ -1181,14 +1325,14 @@ def random_shift_point(pt, max_shift = 5):
     h_s = random.choice(range(1, max_shift+1))
 
     # move the point:
-    if v_d is 'up':
+    if v_d == 'up':
         y += v_s
-    elif v_d is 'down':
+    elif v_d == 'down':
         y -= v_s
 
-    if h_d is 'right':
+    if h_d == 'right':
         x += v_s
-    elif h_d is 'left':
+    elif h_d == 'left':
         x -= v_s
   
     # make sure there are no negatives
