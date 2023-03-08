@@ -11,54 +11,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 
-def add_gsd_to_chips(full_anns, chip_anns):
 
-    '''
-    PURPOSE: Given a set of full image annotations with gsd values and chipped
-    annotations without them, add the gsd values to the corresponding chipped
-    annotations for experimental use
-    IN:
-     - full_anns: str, 
-     - chip_anns: str,
-    OUT:
-     - chip_anns_gsd: str,
-    '''
-
-    with open(full_anns, 'r') as f:
-        data_full = json.load(f)
-    images_full = data_full['images']
-
-    with open(chip_anns, 'r') as f:
-        data_chip = json.load(f)
-    images_chip = data_chip['images']
-
-    new_images_c = []
-
-    # process each chipped image one by one
-    for i_c in tqdm(images_chip, desc = 'Adding GSD to Images'):
-        # copy the data
-        new_i_c = i_c.copy()
-
-        # get the full image info from the chip name
-        im_name_c = i_c['file_name']
-
-        full_im_id = int(im_name_c.split('_')[1])
-
-        # add gsd
-        new_i_c['gsd'] = get_im_gsd_from_id(full_im_id, data_full)
-        new_images_c.append(new_i_c)
-
-    data_chip['images'] = new_images_c
-
-    chip_anns_gsd = chip_anns.split('.')[0] + '_gsd.json'
-
-    if os.path.exists(chip_anns_gsd):
-        os.remove(chip_anns_gsd)
-
-    with open(chip_anns_gsd, 'w') as f:
-        json.dump(data_chip, f)
-
-    return chip_anns_gsd
 
 def anns_on_image(im_id, contents):
     '''
@@ -99,58 +52,6 @@ def anns_on_image_dt(im_id, json_path):
             on_image.append(a)
     
     return on_image
-
-def average_bboxes_from_centerpoints(anns_path, avg_img_gsd = None):
-    '''
-    PURPOSE: After finding average object sizes, and using bounding boxes to add
-             centerpoints (all to a coco annotation file), replace bounding boxes 
-             using image GSD and average object sizes to grow the centerpoints
-    IN:
-     - anns_path: str, path to coco annotations file
-     - avg_img_gsd: float or int, optional, average image size in dataset, 
-                    which will be used as a default if an image doesn't have 
-                    a noted GSD. 
-    OUT:
-     - new_anns_path: str, path to new annotation file
-    '''
-    
-    # open annotation file
-    with open(anns_path, 'r') as f:
-        content = json.load(f)
-
-    # if necessary, get average gsd
-    if avg_img_gsd == None:
-        avg_img_gsd = get_average_image_gsd(anns_path)
-    
-    # pull out key sections of file
-    anns = content['annotations']
-
-    # adjust bounding boxes based on centerpoints and object sizes
-    new_annotations = []
-    for a in tqdm(anns, desc = 'Creating Square Bboxes'):
-        new_a = a.copy()
-        [x,y] = a['centerpoint']
-        obj_size = get_obj_size_from_id(a['category_id'], content)
-        im_gsd = get_im_gsd_from_id(a['image_id'], content)
-        if im_gsd != None:
-            ob_h_w = int(obj_size/im_gsd)
-        else:
-            ob_h_w = int(obj_size/avg_img_gsd)
-        square_bbox = [x - (ob_h_w/2), y - (ob_h_w/2), ob_h_w, ob_h_w]
-        new_a['bbox'] = square_bbox
-        new_annotations.append(new_a)
-
-    content['annotations'] = new_annotations
-
-    new_anns_path = anns_path.split('.')[0] + '_square.json'
-
-    if os.path.exists(new_anns_path):
-        os.remove(new_anns_path)
-    
-    with open(new_anns_path, 'w') as f:
-        json.dump(content, f)
-
-    return new_anns_path
 
 def check_for_parity(train_gt_path, test_gt_path, chip_dir):
     '''
